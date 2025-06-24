@@ -1,0 +1,39 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Caches
+*.log
+*.tmp
+*.cache
+
+# Virtual environments
+.venv/
+env/
+venv/
+
+# VS Code / PyCharm config
+.vscode/
+.idea/
+
+# System files
+.DS_Store
+Thumbs.db
+
+# dotenv / конфиги
+.env
+*.env
+
+# JSON-файлы данных
+wardrobe.json
+log.csv
+faq.csv
+promt.csv
+
+# Python compiled binaries
+*.so
+
+# MacOS и Linux скрытые файлы
+.swp
+.swo
