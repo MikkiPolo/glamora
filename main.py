@@ -105,9 +105,10 @@ def send_to_assistant(user_id, content):
     try:
         messages = []
 
+        expecting_json = False  # 💡 По умолчанию — обычный текст
+
         if isinstance(content, dict):
             if content.get("image_path"):
-                # OpenAI Vision (GPT-4o) — передаём изображение
                 with open(content["image_path"], "rb") as img:
                     base64_img = base64.b64encode(img.read()).decode("utf-8")
                 messages.append({
@@ -117,6 +118,8 @@ def send_to_assistant(user_id, content):
                         {"type": "text", "text": f"Определи категорию СТРОГО из списка: {CATEGORIES} и опиши вещь. Верни JSON: {{\"категория\": \"...\", \"описание\": \"...\"}} ⚠️ Не используй markdown-обёртку ```json. Просто верни JSON."}
                     ]
                 })
+                expecting_json = True
+
             elif content.get("audio_path"):
                 with open(content["audio_path"], "rb") as audio_file:
                     transcript = openai.audio.transcriptions.create(
@@ -124,23 +127,59 @@ def send_to_assistant(user_id, content):
                         file=audio_file
                     )
                     messages.append({"role": "user", "content": transcript.text})
+
+            else:
+                raise ValueError("Неподдерживаемый тип входного контента.")
+
         else:
             messages.append({"role": "user", "content": content})
 
-        # ✅ Новый вызов Responses API
+        # GPT Вызов
         response = openai.chat.completions.create(
             model="gpt-4o",
             messages=messages,
-            temperature=0.5
+            temperature=0.5,
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "load_wardrobe",
+                        "description": "Получает список вещей пользователя, сгруппированный по категориям.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {},
+                        }
+                    }
+                }
+            ],
+
+            tool_choice="auto"
         )
+        # 🛠️ Обработка tool call
+        if response.choices[0].finish_reason == "tool_calls":
+            for tool_call in response.choices[0].message.tool_calls:
+                if tool_call.function.name == "load_wardrobe":
+                    user_wardrobe = load_wardrobe()
+
+                    if not user_wardrobe:
+                        return "🧥 Гардероб пока пуст."
+
+                    response_text = "👗 *Твой гардероб:*\n"
+                    for category, items in user_wardrobe.items():
+                        response_text += f"\n*{category}*\n"
+                        for item in items:
+                            response_text += f"• {item}\n"
+                    return response_text
 
         text = response.choices[0].message.content
         log_message(user_id, "assistant", text, event_type="ASSISTANT_REPLY")
-        return clean_and_parse_json(text)
+
+        return clean_and_parse_json(text) if expecting_json else text
 
     except Exception as e:
         log_message(user_id, "error", str(e), event_type="ERROR")
         return f"❌ Ошибка при обращении к GPT: {e}"
+
 
 # ===================== Wardrobe =====================
 
@@ -153,6 +192,25 @@ def load_wardrobe():
     except json.JSONDecodeError as e:
         print(f"❌ Ошибка чтения wardrobe.json: {e}")
         return {}
+def load_wardrobe_from_tool_call(user_id, items):
+    wardrobe = load_wardrobe()
+    user_id = str(user_id)
+
+    if user_id not in wardrobe:
+        wardrobe[user_id] = {}
+
+    for item in items:
+        category = item["type"].upper()
+        entry = f"{item['name']}, {item['color']}, размер {item['size']}"
+
+        if category not in wardrobe[user_id]:
+            wardrobe[user_id][category] = []
+
+        wardrobe[user_id][category].append(entry)
+
+    save_wardrobe(wardrobe)
+    return {"status": "ok", "message": f"{len(items)} items added to wardrobe"}
+
 
 def save_wardrobe(data):
     try:
@@ -345,7 +403,41 @@ def process_command(msg, user_id, chat_id):
         else:
             send_message(chat_id, "⚠️ Что-то пошло не так при редактировании.")
     else:
-        send_message(chat_id, "🤖 Отправь команду или фото/голос после команды.")
+        # 🔐 Сначала проверим, не в режиме ручного редактирования
+        if user_stage == "awaiting_manual_edit":
+            manual_text = text.strip()
+            current = PENDING_ACTIONS.get(user_id)
+
+            if isinstance(current, dict) and "data" in current:
+                if "категория" not in current["data"]:
+                    send_message(chat_id, "⚠️ Категория утеряна. Пожалуйста, начни сначала.")
+                    return
+
+                current["data"]["описание"] = manual_text
+                current["stage"] = "confirm_add"
+
+                item = current["data"]
+                send_message(chat_id, f"Категория: {item['категория']}\nНовое описание:\n{item['описание']}",
+                             reply_markup={
+                                 "inline_keyboard": [[
+                                     {"text": "Добавить в гардероб", "callback_data": "wardrobe_add"},
+                                     {"text": "Редактировать", "callback_data": "wardrobe_edit"}
+                                 ]]
+                             })
+            else:
+                send_message(chat_id, "⚠️ Что-то пошло не так при редактировании.")
+            return
+
+        # 💬 Любое другое текстовое сообщение — идёт в GPT-ассистенту
+        try:
+            raw = send_to_assistant(user_id, text)
+            if isinstance(raw, dict):
+                formatted = f"Категория: {raw.get('категория')}\nОписание: {raw.get('описание')}"
+            else:
+                formatted = str(raw)
+            send_message(chat_id, formatted)
+        except Exception as e:
+            send_message(chat_id, f"❌ Ошибка при ответе ассистента: {e}")
 
 # ===================== Основной цикл =====================
 
